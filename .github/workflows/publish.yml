@@ -1,0 +1,116 @@
+name: Verify and publish signed Olympus release
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: "Protected product-build workflow run containing artifact signed-olympus-release"
+        required: true
+        type: string
+      source_repository:
+        description: "Approved owner/repository containing the protected product build"
+        required: true
+        type: string
+      channel:
+        description: "Signed channel to publish"
+        required: true
+        type: choice
+        options: [stable, beta]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: windows-2025
+    environment: production-release
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Refuse an unprovisioned production trust boundary
+        shell: pwsh
+        env:
+          RELEASE_APPROVAL: ${{ secrets.OLYMPUS_RELEASE_APPROVAL }}
+          SIGNING_READY: ${{ vars.OLYMPUS_PRODUCTION_SIGNING_READY }}
+          KEY_ID: ${{ vars.OLYMPUS_RELEASE_KEY_ID }}
+          APPROVED_SOURCE: ${{ vars.OLYMPUS_PRODUCT_SOURCE_REPOSITORY }}
+          REQUESTED_SOURCE: ${{ inputs.source_repository }}
+        run: |
+          if ($env:SIGNING_READY -ne 'true' -or [string]::IsNullOrWhiteSpace($env:RELEASE_APPROVAL) -or [string]::IsNullOrWhiteSpace($env:KEY_ID) -or $env:REQUESTED_SOURCE -ne $env:APPROVED_SOURCE) { throw 'Production release trust is not provisioned or source is not approved.' }
+      - name: Download protected signed candidate
+        env:
+          GH_TOKEN: ${{ secrets.OLYMPUS_PRODUCT_SOURCE_TOKEN }}
+        run: gh run download "${{ inputs.source_run_id }}" --repo "${{ inputs.source_repository }}" --name signed-olympus-release --dir candidate
+      - name: Select exact candidate files
+        id: candidate
+        shell: pwsh
+        run: |
+          $feed = Get-ChildItem candidate -Filter '${{ inputs.channel }}.json' -File
+          $asset = Get-ChildItem candidate -Filter 'olympus-windows-*.opkg' -File
+          $manifest = Get-ChildItem candidate -Filter 'publication-manifest.json' -File
+          $all = @(Get-ChildItem candidate -Force)
+          if ($feed.Count -ne 1 -or $asset.Count -ne 1 -or $manifest.Count -ne 1 -or $all.Count -ne 3 -or @($all | Where-Object { -not $_.PSIsContainer }).Count -ne 3) { throw 'Candidate must contain exactly the signed feed, package, and closed publication manifest.' }
+          "feed=$($feed.FullName)" >> $env:GITHUB_OUTPUT
+          "asset=$($asset.FullName)" >> $env:GITHUB_OUTPUT
+          "manifest=$($manifest.FullName)" >> $env:GITHUB_OUTPUT
+      - name: Verify Olympus signature and closed package
+        shell: pwsh
+        env:
+          OLYMPUS_RELEASE_KEY_ID: ${{ vars.OLYMPUS_RELEASE_KEY_ID }}
+          OLYMPUS_EXPECTED_CHANNEL: ${{ inputs.channel }}
+        run: node scripts/verify-candidate.mjs '${{ steps.candidate.outputs.feed }}' '${{ steps.candidate.outputs.asset }}' '${{ steps.candidate.outputs.manifest }}' 'keys/release-root.pem' 'policy/privacy-denylist.json' 'verified-executables'
+      - name: Verify trusted timestamped Windows publisher
+        shell: pwsh
+        run: |
+          $feed = Get-Content -Raw -LiteralPath '${{ steps.candidate.outputs.feed }}' | ConvertFrom-Json
+          $pins = @($feed.signed.asset.authenticode.certificate_thumbprints | ForEach-Object { ([string]$_ -replace '[^0-9A-Fa-f]','').ToUpperInvariant() })
+          if ($pins.Count -eq 0) { throw 'Signed feed has no pinned signer certificate.' }
+          Get-ChildItem verified-executables -Filter '*.exe' | ForEach-Object {
+            $sig = Get-AuthenticodeSignature -LiteralPath $_.FullName
+            $chain = [System.Security.Cryptography.X509Certificates.X509Chain]::new()
+            $chain.ChainPolicy.RevocationMode = [System.Security.Cryptography.X509Certificates.X509RevocationMode]::Online
+            $chain.ChainPolicy.RevocationFlag = [System.Security.Cryptography.X509Certificates.X509RevocationFlag]::ExcludeRoot
+            $chainValid = $null -ne $sig.SignerCertificate -and $chain.Build($sig.SignerCertificate)
+            $actual = ([string]$sig.SignerCertificate.Thumbprint -replace '[^0-9A-Fa-f]','').ToUpperInvariant()
+            if ($sig.Status -ne 'Valid' -or -not $chainValid -or $pins -notcontains $actual -or $null -eq $sig.TimeStamperCertificate) { throw "Untrusted, unpinned, or untimestamped executable: $($_.Name)" }
+          }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: verified-olympus-release
+          path: |
+            ${{ steps.candidate.outputs.feed }}
+            ${{ steps.candidate.outputs.asset }}
+            ${{ steps.candidate.outputs.manifest }}
+          if-no-files-found: error
+
+  publish:
+    needs: verify
+    runs-on: ubuntu-24.04
+    environment: production-release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: verified-olympus-release
+          path: candidate
+      - name: Publish immutable release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(node -e "const f=require('fs');const p=JSON.parse(f.readFileSync('candidate/${{ inputs.channel }}.json'));process.stdout.write(p.signed.version)")
+          prerelease=''
+          if [ '${{ inputs.channel }}' = beta ]; then prerelease='--prerelease'; fi
+          git config user.name 'Olympus Release Bot'
+          git config user.email 'olympus-release-bot@users.noreply.github.com'
+          git tag -a "v${version}" -m "Olympus ${version} signed release"
+          git push origin "v${version}"
+          gh release create "v${version}" "candidate/${{ inputs.channel }}.json" candidate/olympus-windows-*.opkg candidate/publication-manifest.json --verify-tag --generate-notes $prerelease
+      - name: Advance the signed channel pointer
+        run: |
+          cp 'candidate/${{ inputs.channel }}.json' 'channels/${{ inputs.channel }}.json'
+          git config user.name 'Olympus Release Bot'
+          git config user.email 'olympus-release-bot@users.noreply.github.com'
+          git add -- 'channels/${{ inputs.channel }}.json'
+          git commit -m 'release(${{ inputs.channel }}): advance signed channel metadata'
+          git push origin HEAD:${{ github.event.repository.default_branch }}

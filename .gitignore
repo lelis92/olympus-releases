@@ -1,0 +1,7 @@
+candidate/
+verified-executables/
+*.opkg
+*.tmp
+*.key
+*.pfx
+*.p12
