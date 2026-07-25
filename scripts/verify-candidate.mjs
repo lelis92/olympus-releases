@@ -42,13 +42,15 @@ const envelope = JSON.parse(text);
 if (`${canonical(envelope)}\n` !== text || !Array.isArray(envelope.signatures) || envelope.signatures.length === 0) throw new Error("Feed is not a canonical signed envelope");
 const signed = envelope.signed;
 const publishedAt = Date.parse(signed?.published_at); const expiresAt = Date.parse(signed?.expires_at);
+const verificationNow = process.env.OLYMPUS_VERIFICATION_TIME ? Date.parse(process.env.OLYMPUS_VERIFICATION_TIME) : Date.now();
+if (!Number.isFinite(verificationNow)) throw new Error("Verification time is invalid");
 if (signed?.schema_version !== 1 || signed.product !== "olympus-pantheon" || signed.channel !== process.env.OLYMPUS_EXPECTED_CHANNEL
     || !Number.isSafeInteger(signed.sequence) || signed.sequence < 1 || !Number.isFinite(publishedAt) || !Number.isFinite(expiresAt)
-    || publishedAt > Date.now() + 5 * 60_000 || expiresAt <= Date.now() || expiresAt <= publishedAt || expiresAt - publishedAt > 31 * 24 * 60 * 60_000
+    || publishedAt > verificationNow + 5 * 60_000 || expiresAt <= verificationNow || expiresAt <= publishedAt || expiresAt - publishedAt > 31 * 24 * 60 * 60_000
     || signed.target?.os !== "windows" || !["x64", "arm64"].includes(signed.target?.arch)
-    || signed.asset?.authenticode?.required !== true || typeof signed.asset.authenticode.publisher !== "string" || !signed.asset.authenticode.publisher
-    || !Array.isArray(signed.asset.authenticode.certificate_thumbprints) || signed.asset.authenticode.certificate_thumbprints.length === 0
-    || signed.asset.authenticode.certificate_thumbprints.some((item) => !/^[0-9A-F]{40,64}$/.test(item))) throw new Error("Signed production release policy is incomplete or expired");
+    || signed.asset?.trust?.model !== "olympus-ed25519-sha256-v1"
+    || !/^[0-9a-f]{64}$/.test(signed.asset.trust.runtime_manifest_sha256 || "")
+    || signed.asset.trust.runtime_manifest_sha256 !== signed.package_manifest_sha256) throw new Error("Signed production release policy is incomplete or expired");
 const assetUrl = new URL(signed.asset.url);
 if (assetUrl.protocol !== "https:" || assetUrl.username || assetUrl.password || assetUrl.hash || decodeURIComponent(assetUrl.pathname.split("/").pop()) !== signed.asset.name) throw new Error("Signed asset URL policy failed");
 const keyId = process.env.OLYMPUS_RELEASE_KEY_ID;
@@ -104,4 +106,5 @@ for (const item of archive.files) {
   if (/\.exe$/i.test(item.path)) { writeFileSync(join(outputPath, `${executableCount}-${basename(item.path)}`), bytes, { flag: "wx" }); executableCount += 1; }
 }
 if (actualFiles.size !== expectedFiles.size || executableCount === 0) throw new Error("Candidate package is incomplete or contains no Windows executable");
-process.stdout.write(`${JSON.stringify({ channel: envelope.signed.channel, version: envelope.signed.version, sequence: envelope.signed.sequence, publisher: envelope.signed.asset.authenticode.publisher, executable_count: executableCount })}\n`);
+process.stdout.write(`${JSON.stringify({ channel: envelope.signed.channel, version: envelope.signed.version,
+  sequence: envelope.signed.sequence, trust_model: envelope.signed.asset.trust.model, executable_count: executableCount })}\n`);

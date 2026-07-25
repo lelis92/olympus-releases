@@ -4,4 +4,4 @@ Do not open a public issue for a suspected signing-key compromise, updater bypas
 
 Supported channels are the latest stable release and the latest beta release. A signed revocation or emergency rollback uses a new, higher feed sequence. Existing metadata is never silently rewritten to lower the replay floor.
 
-Release metadata uses a product-specific offline or hardware-backed Ed25519 authority. Windows executables additionally require a trusted Authenticode publisher and RFC 3161 timestamp. GitHub authentication and HTTPS are transport defenses, not the Olympus trust root.
+Release metadata and installed runtime manifests use a product-specific offline Ed25519 authority. The one-time bridge installer is separately signed with a dedicated Minisign key. Olympus-owned Windows executables are authenticated by that signed-manifest closure, not paid Authenticode. Third-party vendor helpers retain their own Authenticode checks. GitHub authentication and HTTPS are transport defenses, not the Olympus trust root.

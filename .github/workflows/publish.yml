@@ -58,21 +58,6 @@ jobs:
           OLYMPUS_RELEASE_KEY_ID: ${{ vars.OLYMPUS_RELEASE_KEY_ID }}
           OLYMPUS_EXPECTED_CHANNEL: ${{ inputs.channel }}
         run: node scripts/verify-candidate.mjs '${{ steps.candidate.outputs.feed }}' '${{ steps.candidate.outputs.asset }}' '${{ steps.candidate.outputs.manifest }}' 'keys/release-root.pem' 'policy/privacy-denylist.json' 'verified-executables'
-      - name: Verify trusted timestamped Windows publisher
-        shell: pwsh
-        run: |
-          $feed = Get-Content -Raw -LiteralPath '${{ steps.candidate.outputs.feed }}' | ConvertFrom-Json
-          $pins = @($feed.signed.asset.authenticode.certificate_thumbprints | ForEach-Object { ([string]$_ -replace '[^0-9A-Fa-f]','').ToUpperInvariant() })
-          if ($pins.Count -eq 0) { throw 'Signed feed has no pinned signer certificate.' }
-          Get-ChildItem verified-executables -Filter '*.exe' | ForEach-Object {
-            $sig = Get-AuthenticodeSignature -LiteralPath $_.FullName
-            $chain = [System.Security.Cryptography.X509Certificates.X509Chain]::new()
-            $chain.ChainPolicy.RevocationMode = [System.Security.Cryptography.X509Certificates.X509RevocationMode]::Online
-            $chain.ChainPolicy.RevocationFlag = [System.Security.Cryptography.X509Certificates.X509RevocationFlag]::ExcludeRoot
-            $chainValid = $null -ne $sig.SignerCertificate -and $chain.Build($sig.SignerCertificate)
-            $actual = ([string]$sig.SignerCertificate.Thumbprint -replace '[^0-9A-Fa-f]','').ToUpperInvariant()
-            if ($sig.Status -ne 'Valid' -or -not $chainValid -or $pins -notcontains $actual -or $null -eq $sig.TimeStamperCertificate) { throw "Untrusted, unpinned, or untimestamped executable: $($_.Name)" }
-          }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: verified-olympus-release
